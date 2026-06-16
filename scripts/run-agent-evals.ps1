@@ -17,6 +17,10 @@ param(
     [double]$FibeyThreshold = 0.70,
     [int]$MaxCasesPerAgent = 5,
     [string]$OutputPath = (Join-Path $RepoRoot "artifacts\eval\agent-eval-summary.json"),
+    [bool]$PublishToFoundryPortal = $true,
+    [string]$FoundryPortalOutputPath = (Join-Path $RepoRoot "artifacts\eval\foundry-quality-eval-summary.json"),
+    [string]$FoundryQualityEvalScript = (Join-Path $PSScriptRoot "run-quality-eval-foundry.py"),
+    [bool]$FailOnFoundryPortalPublishError = $true,
     [bool]$PublishToAzurePortal = $true,
     [bool]$FailOnPortalPublishError = $true,
     [string]$PortalEventPrefix = "AgentEval"
@@ -356,6 +360,36 @@ try {
                 throw
             }
             Write-Warning "Failed to publish evaluation results to Azure portal: $($_.Exception.Message)"
+        }
+    }
+
+    if ($PublishToFoundryPortal) {
+        try {
+            if (-not (Test-Path $FoundryQualityEvalScript)) {
+                throw "Foundry quality eval script not found: $FoundryQualityEvalScript"
+            }
+
+            $foundryArgs = @($FoundryQualityEvalScript, "--output-path", $FoundryPortalOutputPath)
+            if (-not [string]::IsNullOrWhiteSpace($summary.env_name)) {
+                $foundryArgs += @("--env-name", [string]$summary.env_name)
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($EnvName)) {
+                $foundryArgs += @("--env-name", [string]$EnvName)
+            }
+
+            $foundryOut = (& python @foundryArgs 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Foundry quality eval run failed: $foundryOut"
+            }
+
+            Write-Host "Published quality evaluation runs to Foundry portal."
+            Write-Host $foundryOut
+        }
+        catch {
+            if ($FailOnFoundryPortalPublishError) {
+                throw
+            }
+            Write-Warning "Failed to publish evaluation results to Foundry portal: $($_.Exception.Message)"
         }
     }
 

@@ -70,6 +70,16 @@ jobs:
       - name: Setup azd
         uses: Azure/setup-azd@v2
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Foundry eval dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install azure-ai-projects azure-identity
+
       - name: Install azd extensions
         run: |
           azd extension install azure.ai.agents --force
@@ -176,6 +186,16 @@ jobs:
       - name: Setup azd
         uses: Azure/setup-azd@v2
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Foundry eval dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install azure-ai-projects azure-identity
+
       - name: Install azd extensions
         run: |
           azd extension install azure.ai.agents --force
@@ -276,6 +296,16 @@ jobs:
 
       - name: Setup azd
         uses: Azure/setup-azd@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Foundry eval dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install azure-ai-projects azure-identity
 
       - name: Install azd extensions
         run: |

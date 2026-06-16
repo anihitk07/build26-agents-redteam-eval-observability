@@ -52,6 +52,34 @@ function Run-WorkspaceKql {
         --output json 2>&1 | Out-String
 }
 
+function Run-AppInsightsKql {
+    param(
+        [string]$AppId,
+        [string]$Query,
+        [string]$TimespanIso
+    )
+    return & az monitor app-insights query `
+        --app $AppId `
+        --analytics-query $Query `
+        --offset $TimespanIso `
+        --output json 2>&1 | Out-String
+}
+
+function Get-TrimmedText {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return ""
+    }
+
+    return $text.Trim()
+}
+
 Push-Location $RepoRoot
 try {
     if ($EnvName) {
@@ -62,20 +90,25 @@ try {
     $resourceGroup = $envMap["AZURE_RESOURCE_GROUP"]
     $appInsightsId = $envMap["APPLICATIONINSIGHTS_RESOURCE_ID"]
     $workspaceId = $envMap["LOG_ANALYTICS_WORKSPACE_ID"]
+    $appInsightsAppId = Get-TrimmedText $envMap["APPLICATIONINSIGHTS_APP_ID"]
 
     if (-not $resourceGroup) {
         throw "AZURE_RESOURCE_GROUP missing in azd env values."
     }
 
     if (-not $appInsightsId) {
-        $appInsightsId = (& az resource list -g $resourceGroup --resource-type "microsoft.insights/components" --query "[0].id" -o tsv 2>$null).Trim()
+        $appInsightsId = Get-TrimmedText (& az resource list -g $resourceGroup --resource-type "microsoft.insights/components" --query "[0].id" -o tsv 2>$null)
     }
     if (-not $workspaceId) {
-        $workspaceId = (& az monitor log-analytics workspace list -g $resourceGroup --query "[0].customerId" -o tsv 2>$null).Trim()
+        $workspaceId = Get-TrimmedText (& az monitor log-analytics workspace list -g $resourceGroup --query "[0].customerId" -o tsv 2>$null)
     }
 
-    if (-not $workspaceId) {
-        throw "Log Analytics workspace not found. Configure Application Insights workspace-based logging first."
+    if (-not $appInsightsAppId -and $appInsightsId) {
+        $appInsightsAppId = Get-TrimmedText (& az resource show --ids $appInsightsId --query "properties.AppId" -o tsv 2>$null)
+    }
+
+    if (-not $workspaceId -and -not $appInsightsAppId) {
+        throw "Neither Log Analytics workspace ID nor Application Insights AppId could be resolved. Configure workspace-based App Insights or set APPLICATIONINSIGHTS_APP_ID in the azd env."
     }
 
     $queries = [ordered]@{
@@ -120,13 +153,20 @@ AppEvents
         resource_group = $resourceGroup
         app_insights_resource_id = $appInsightsId
         log_analytics_workspace_id = $workspaceId
+        app_insights_app_id = $appInsightsAppId
         timespan = $Timespan
+        query_mode = if ($workspaceId) { "log_analytics_workspace" } else { "app_insights_app_id" }
         queries = @{}
     }
 
     foreach ($queryName in $queries.Keys) {
         Write-Host "Running query: $queryName"
-        $result = Run-WorkspaceKql -WorkspaceId $workspaceId -Query $queries[$queryName] -TimespanIso $Timespan
+        if ($workspaceId) {
+            $result = Run-WorkspaceKql -WorkspaceId $workspaceId -Query $queries[$queryName] -TimespanIso $Timespan
+        }
+        else {
+            $result = Run-AppInsightsKql -AppId $appInsightsAppId -Query $queries[$queryName] -TimespanIso $Timespan
+        }
         if ($LASTEXITCODE -ne 0) {
             $summary.queries[$queryName] = @{
                 success = $false

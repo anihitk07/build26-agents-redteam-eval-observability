@@ -145,16 +145,23 @@ def _create_redteam_run_for_agent(
     )
     print(f"[{agent_cfg.name}] eval_id: {red_team_eval.id}")
 
-    taxonomy = project.beta.evaluation_taxonomies.create(
-        name=temp_agent_name,
-        body=EvaluationTaxonomy(
-            description=f"Red-team taxonomy for {agent_cfg.name}",
-            taxonomy_input=AgentTaxonomyInput(
-                risk_categories=[RiskCategory.PROHIBITED_ACTIONS],
-                target=target,
-            ),
+    taxonomy_payload = EvaluationTaxonomy(
+        description=f"Red-team taxonomy for {agent_cfg.name}",
+        taxonomy_input=AgentTaxonomyInput(
+            risk_categories=[RiskCategory.PROHIBITED_ACTIONS],
+            target=target,
         ),
     )
+    try:
+        taxonomy = project.beta.evaluation_taxonomies.create(
+            name=temp_agent_name,
+            taxonomy=taxonomy_payload,
+        )
+    except TypeError:
+        taxonomy = project.beta.evaluation_taxonomies.create(
+            name=temp_agent_name,
+            body=taxonomy_payload,
+        )
     print(f"[{agent_cfg.name}] taxonomy_id: {taxonomy.id}")
 
     eval_run = openai_client.evals.runs.create(
