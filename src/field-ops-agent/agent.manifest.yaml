@@ -18,8 +18,12 @@ template:
       version: 1.0.0
   environment_variables:
     - name: MODEL_DEPLOYMENT_NAME
-      value: "gpt-5"
+      value: "gpt-5.4"
+    - name: TOOLBOX_ENDPOINT
+      value: ""
+    - name: TOOLBOX_FEATURES
+      value: "Toolboxes=V1Preview"
 resources:
   - kind: model
-    id: gpt-5
+    id: gpt-5.4
     name: MODEL_DEPLOYMENT_NAME

@@ -74,6 +74,12 @@ azd ai agent invoke --local "What is the fiber spec for Quincy North?"
 azd deploy field-ops-agent
 ```
 
+For the VS Code Agent Inspector/debug workflow, install local tooling separately:
+
+```bash
+python -m pip install --pre agent-dev-cli debugpy
+```
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -81,7 +87,7 @@ azd deploy field-ops-agent
 | `FOUNDRY_PROJECT_ENDPOINT` | yes | Auto-injected in hosted containers |
 | `AZURE_AI_MODEL_DEPLOYMENT_NAME` | yes | Model deployment name |
 | `TOOLBOX_ENDPOINT` | no | Toolbox MCP URL — when set, Toolbox tools appear in the agent |
-| `FOUNDRY_AGENT_TOOLBOX_FEATURES` | no | Toolbox feature-flag header (default `Toolboxes=V1Preview`) |
+| `TOOLBOX_FEATURES` | no | Toolbox feature-flag header (default `Toolboxes=V1Preview`) |
 
 ## Walkthrough talking points (suggested order)
 

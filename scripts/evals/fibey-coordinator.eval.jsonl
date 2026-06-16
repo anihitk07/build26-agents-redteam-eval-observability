@@ -1,0 +1,5 @@
+{"id":"fc-001","query":"Check network telemetry for Quincy North - any active alerts?","expected_keywords":["Quincy North","active","ALT-20260524-001"]}
+{"id":"fc-002","query":"What active incidents do we have across all sites?","expected_keywords":["INC-","P1","status"]}
+{"id":"fc-003","query":"Dispatch a work order for the CRC error on Rack B-14","expected_keywords":["approval","pending","APPROVAL REQUIRED"]}
+{"id":"fc-004","query":"Escalate the Quincy North optical power issue - SLA at risk","expected_keywords":["approval","pending","APPROVAL REQUIRED"]}
+{"id":"fc-005","query":"Save an investigation report for the fiber degradation incident","expected_keywords":["saved","investigation","status"]}

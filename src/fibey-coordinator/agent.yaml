@@ -25,13 +25,21 @@ resources:
   memory: 2Gi
 environment_variables:
   - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
-    value: gpt-5
+    value: gpt-5.4
+  - name: TOOLBOX_ENDPOINT
+    value: ""
+  - name: TOOLBOX_FEATURES
+    value: Toolboxes=V1Preview
   - name: APPROVAL_SERVER_PORT
     value: "8090"
   - name: ENABLE_INSTRUMENTATION
     value: "true"
   - name: ENABLE_SENSITIVE_DATA
     value: "true"
+
+  # Optional toolbox MCP endpoint. Leave FIBEY_TOOLBOX_ENDPOINT unset to disable.
+  # Format:
+  #   https://<account>.services.ai.azure.com/api/projects/<project>/toolboxes/<toolbox>/mcp?api-version=v1
 
   # ── Optional: Durable Task Scheduler (human-in-the-loop approval workflow) ──
   # When set, approval-gated work orders run through a durable orchestration so
@@ -50,3 +58,7 @@ environment_variables:
   #   value: <operator-upn@your-tenant>
   # - name: TEAMS_STATE_BLOB_URL
   #   value: https://<account>.blob.core.windows.net/teams-state
+
+
+
+

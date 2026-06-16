@@ -39,6 +39,8 @@ Tools:
 
 import json
 import logging
+import os
+import pathlib
 
 from task_store import Task, TaskStore, TaskStatus
 
@@ -73,7 +75,8 @@ ROUTER_TOOLS = [
         "description": (
             "Delegate a field-ops request to the background worker agent. "
             "Use for: site specs lookup, Work IQ search, repair procedures, "
-            "document analysis — anything requiring tool execution."
+            "document analysis, and general technical lookups that require tools "
+            "(including WebIQ queries)."
         ),
         "parameters": {
             "type": "object",
@@ -154,40 +157,28 @@ ROUTER_TOOLS = [
 # Force the model to always call a tool (no free-text path)
 ROUTER_TOOL_CHOICE = "required"
 
-ROUTER_SYSTEM_PROMPT = """You are the front-desk assistant for field operations technicians at Microsoft data centers.
+def _load_router_system_prompt() -> str:
+    configured = os.getenv("ROUTER_SYSTEM_PROMPT_FILE", "").strip()
+    default_path = (
+        pathlib.Path(__file__).resolve().parent
+        / ".agent_configs"
+        / "router-instructions.md"
+    )
+    prompt_path = pathlib.Path(configured) if configured else default_path
+    if not prompt_path.is_absolute():
+        prompt_path = (pathlib.Path(__file__).resolve().parent / prompt_path).resolve()
+    if not prompt_path.exists():
+        raise FileNotFoundError(
+            f"Router prompt file not found: {prompt_path}. "
+            "Set ROUTER_SYSTEM_PROMPT_FILE to a valid path."
+        )
+    prompt = prompt_path.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise ValueError(f"Router prompt file is empty: {prompt_path}")
+    return prompt
 
-You MUST call exactly one function per turn. You cannot respond with plain text.
 
-FUNCTION SELECTION:
-- respond_directly: greetings, chat, clarifications, capability questions, delivering completed results, acknowledging user, answering from conversation history, ANY question unrelated to field-ops
-- start_task: user provides a COMPLETE, ACTIONABLE field-ops request (they've given enough info to act on)
-- check_task_status: user asks about progress of a running task
-- cancel_task: user wants to stop a task
-- get_task_result: retrieve a finished task's result that hasn't been shown yet
-
-WHEN TO USE start_task vs respond_directly:
-- "Analyze document 12345" → start_task (actionable: document ID is provided)
-- "Can you analyze a document?" → respond_directly (capability question, no document specified)
-- "Search site specs for Quincy North" → start_task (actionable: site name provided)
-- "Can you look stuff up?" → respond_directly (no specific request)
-- "How old are you?" / "What's the weather?" → respond_directly (unrelated to field-ops)
-- "Great" / "Thanks" → respond_directly (acknowledgment)
-
-RULES:
-1. For greetings/chat/thanks/acknowledgments ("Great", "OK", "Thank you", "Got it", "Perfect", etc.) → ALWAYS call respond_directly. NEVER re-trigger a task for these.
-2. For questions UNRELATED to field operations (personal questions, general knowledge, small talk) → ALWAYS call respond_directly, regardless of any running tasks.
-3. Only call start_task when the user provides a SPECIFIC, ACTIONABLE request with enough parameters to execute (e.g., a document ID, a site name, a procedure type). If key information is missing, call respond_directly to ask for it.
-4. Do NOT call start_task if a running task already covers the same request (check "Running tasks" context).
-5. Do NOT call start_task if the user is referring to a result that was ALREADY delivered. If the result is in conversation history or in "Recently delivered" context, call respond_directly and re-state it.
-6. If "Recently completed" results exist in context, call respond_directly and include those results naturally in your message.
-7. If the user asks to recall/replay/repeat a previous result, look at conversation history or "Recently delivered" context and call respond_directly with that information.
-8. Match the user's language. Keep messages concise (voice-enabled, hands-free).
-9. When the user's message has BOTH chat and a NEW actionable field-ops request, call start_task (the ack_message handles the conversational part).
-
-IMPORTANT: A message like "Great", "Thanks", "OK" after a delivered result is just the user acknowledging — respond with something brief and friendly. Do NOT re-run the task.
-IMPORTANT: If there is a running task and the user says something UNRELATED, just respond with respond_directly. Do NOT create a new task.
-
-STYLE: concise, helpful, technical when needed. The technician is working hands-free."""
+ROUTER_SYSTEM_PROMPT = _load_router_system_prompt()
 
 
 # ── Router Tool Execution ─────────────────────────────────────────────────────

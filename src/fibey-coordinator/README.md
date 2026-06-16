@@ -34,7 +34,7 @@ Currently using mock data with rich telemetry, alerts, and incident portfolios.
 
 ## Model
 
-- Deployment: gpt-5 (configurable via AZURE_AI_MODEL_DEPLOYMENT_NAME)
+- Deployment: gpt-5.4 (configurable via AZURE_AI_MODEL_DEPLOYMENT_NAME)
 
 ## Example Prompts
 
@@ -44,7 +44,14 @@ Currently using mock data with rich telemetry, alerts, and incident portfolios.
 - What active incidents do we have across all sites?
 - Escalate the Quincy North optical power issue - SLA at risk
 
+## Optional Toolbox MCP integration
+
+Set `TOOLBOX_ENDPOINT` to your Foundry toolbox MCP endpoint to expose toolbox-managed tools in Fibey:
+
+`https://<account>.services.ai.azure.com/api/projects/<project>/toolboxes/<toolbox>/mcp?api-version=v1`
+
 ## Running
 
 azd ai agent run --service fibey-coordinator
 azd deploy fibey-coordinator
+azd ai agent invoke fibey-coordinator --protocol responses "Check network telemetry for Quincy North - any active alerts?"

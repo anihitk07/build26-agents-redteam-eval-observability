@@ -9,5 +9,5 @@ evaluators:
       version: "5"
       local_uri: evaluators/field-ops-agent/rubric_dimensions.json
 options:
-    eval_model: gpt-5
+    eval_model: gpt-5.4
 max_samples: 5

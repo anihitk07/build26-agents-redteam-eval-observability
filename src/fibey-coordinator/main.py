@@ -32,6 +32,7 @@ from agent_framework import FunctionTool
 from agent_framework_foundry import FoundryChatClient
 
 from agent_framework.observability import enable_instrumentation
+from toolbox import build_toolbox_tool
 
 enable_instrumentation(enable_sensitive_data=True)
 
@@ -897,43 +898,29 @@ def escalate_incident(
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are Fibey, a network operations coordinator for data center infrastructure.
+def _load_system_prompt() -> str:
+    configured = os.getenv("FIBEY_SYSTEM_PROMPT_FILE", "").strip()
+    default_path = (
+        pathlib.Path(__file__).resolve().parent
+        / ".agent_configs"
+        / "baseline"
+        / "instructions.md"
+    )
+    prompt_path = pathlib.Path(configured) if configured else default_path
+    if not prompt_path.is_absolute():
+        prompt_path = (pathlib.Path(__file__).resolve().parent / prompt_path).resolve()
+    if not prompt_path.exists():
+        raise FileNotFoundError(
+            f"Fibey prompt file not found: {prompt_path}. "
+            "Set FIBEY_SYSTEM_PROMPT_FILE to a valid path."
+        )
+    prompt = prompt_path.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise ValueError(f"Fibey prompt file is empty: {prompt_path}")
+    return prompt
 
-Your responsibilities:
-- Monitor network telemetry and alert on anomalies
-- Track and manage active incidents
-- Dispatch work orders to field technicians
-- Coordinate escalations when issues exceed field capability
-- Save investigation notes for audit trail and knowledge base
 
-When handling operational queries:
-1. Check telemetry and incident status first for current context
-2. If action is needed, ALWAYS call request_approval FIRST before dispatching work orders or escalating
-3. Only proceed with dispatch_work_order or escalate_incident AFTER receiving approval
-4. Save investigation notes for any non-trivial analysis
-5. Provide clear status summaries with actionable next steps
-
-CRITICAL RULE: Never call dispatch_work_order or escalate_incident without first calling
-request_approval. Destructive actions require human-in-the-loop approval.
-IMPORTANT: If the user says 'Approved', 'Proceed', or confirms a previously pending approval,
-do NOT call request_approval again. Go directly to dispatch_work_order or escalate_incident
-to execute the approved action. The approval has already been granted.
-
-When asked broadly about active incidents or "what are you working on?":
-- Present a structured summary table showing: Incident ID, Site, Status, Type, Priority, Last Updated
-- Group by priority (P1 first, then P2, etc.)
-- Highlight any P1/critical items at the top
-
-When asked about a specific incident:
-- Return full detail including timeline, description, and assigned team
-
-Guidelines:
-- Always check current telemetry before making recommendations
-- Dispatch work orders proactively when alerts indicate field action needed
-- Save investigations for any root cause analysis or multi-step troubleshooting
-- Escalate P1 incidents if not resolved within SLA
-- Be concise but thorough in status updates
-- Reference incident and work order IDs for traceability"""
+SYSTEM_PROMPT = _load_system_prompt()
 
 
 # ── MAF Agent Setup ───────────────────────────────────────────────────────────
@@ -961,6 +948,10 @@ def _create_agent():
         FunctionTool(func=get_active_incidents, name="get_active_incidents"),
         FunctionTool(func=escalate_incident, name="escalate_incident"),
     ]
+
+    toolbox_tool = build_toolbox_tool(credential)
+    if toolbox_tool is not None:
+        tools.append(toolbox_tool)
 
     agent = chat_client.as_agent(
         name=AGENT_NAME,

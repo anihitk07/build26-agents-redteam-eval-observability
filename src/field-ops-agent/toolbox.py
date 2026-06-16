@@ -21,7 +21,7 @@ Environment variables:
   TOOLBOX_ENDPOINT
       Full Toolbox MCP endpoint URL. When unset, this module returns ``None``
       and the agent runs with local tools only (handy for quick demos).
-  FOUNDRY_AGENT_TOOLBOX_FEATURES
+  TOOLBOX_FEATURES
       Feature-flag header forwarded to the Toolbox proxy.
       Defaults to ``Toolboxes=V1Preview``.
 """
@@ -86,7 +86,7 @@ def build_toolbox_tool(credential: DefaultAzureCredential) -> MCPStreamableHTTPT
         logger.info("TOOLBOX_ENDPOINT not set — Toolbox tools disabled.")
         return None
 
-    features = os.getenv("FOUNDRY_AGENT_TOOLBOX_FEATURES", "Toolboxes=V1Preview")
+    features = os.getenv("TOOLBOX_FEATURES", "Toolboxes=V1Preview")
     token_provider = get_bearer_token_provider(credential, "https://ai.azure.com/.default")
 
     http_client = httpx.AsyncClient(

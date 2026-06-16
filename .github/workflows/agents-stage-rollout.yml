@@ -1,0 +1,359 @@
+name: Agents Stage Rollout (dev-test-prod)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      location:
+        description: "Azure location for azd provision"
+        required: false
+        default: "eastus2"
+        type: string
+      toolbox_name:
+        description: "Foundry toolbox name"
+        required: false
+        default: "shared-agent-tools"
+        type: string
+      field_ops_threshold:
+        description: "field-ops-agent eval pass threshold (0-1)"
+        required: false
+        default: "0.70"
+        type: string
+      fibey_threshold:
+        description: "fibey-coordinator eval pass threshold (0-1)"
+        required: false
+        default: "0.70"
+        type: string
+      max_eval_cases:
+        description: "Max eval cases per agent"
+        required: false
+        default: "5"
+        type: string
+      run_redteam:
+        description: "Run red-team safety gate"
+        required: false
+        default: false
+        type: boolean
+      redteam_threshold:
+        description: "Red-team safety pass threshold (0-1)"
+        required: false
+        default: "0.75"
+        type: string
+      run_observability:
+        description: "Run MAF observability telemetry export"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-dev:
+    name: Deploy + test + eval (DEV)
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      WEBIQ_API_KEY: ${{ secrets.WEBIQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup azd
+        uses: Azure/setup-azd@v2
+
+      - name: Install azd extensions
+        run: |
+          azd extension install azure.ai.agents --force
+          azd extension install azure.ai.toolboxes --force
+
+      - name: Select/create azd env
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_NAME="brk241-dev"
+          if azd env list --output json | jq -e ".[] | select(.name == \"$ENV_NAME\")" >/dev/null; then
+            azd env select "$ENV_NAME"
+          else
+            azd env new "$ENV_NAME" --no-prompt
+          fi
+          LOCATION="${{ github.event.inputs.location }}"
+          if [[ -z "$LOCATION" ]]; then LOCATION="eastus2"; fi
+          azd env set AZURE_LOCATION "$LOCATION"
+          azd env set AZURE_SUBSCRIPTION_ID "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Provision infrastructure
+        run: azd provision --no-prompt
+
+      - name: Setup toolbox + deploy both agents
+        shell: pwsh
+        run: |
+          $toolbox = "${{ github.event.inputs.toolbox_name }}"
+          if ([string]::IsNullOrWhiteSpace($toolbox)) { $toolbox = "shared-agent-tools" }
+          ./scripts/setup-toolbox.ps1 -EnvName "brk241-dev" -ToolboxName $toolbox -DeployAgents
+
+      - name: Validate toolbox endpoint wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          for agent in field-ops-agent fibey-coordinator; do
+            endpoint="$(azd ai agent show "$agent" --output json | jq -r '.definition.environment_variables.TOOLBOX_ENDPOINT // empty')"
+            if [[ -z "$endpoint" ]]; then
+              echo "::error::TOOLBOX_ENDPOINT is empty for $agent. Toolbox wiring is required after deploy."
+              exit 1
+            fi
+            if [[ "$endpoint" != *"/toolboxes/"* ]]; then
+              echo "::error::TOOLBOX_ENDPOINT for $agent does not look like a toolbox MCP endpoint: $endpoint"
+              exit 1
+            fi
+            echo "$agent TOOLBOX_ENDPOINT=$endpoint"
+          done
+
+      - name: Smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          azd ai agent invoke field-ops-agent --new-session --new-conversation "What is the fiber spec for Quincy North?"
+          azd ai agent invoke fibey-coordinator --protocol responses --new-session --new-conversation "Check network telemetry for Quincy North - any active alerts?"
+
+      - name: Evaluation gate (threshold)
+        shell: pwsh
+        run: |
+          $field = "${{ github.event.inputs.field_ops_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($field)) { $field = "0.70" }
+          $fibey = "${{ github.event.inputs.fibey_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($fibey)) { $fibey = "0.70" }
+          $maxCases = "${{ github.event.inputs.max_eval_cases }}"
+          if ([string]::IsNullOrWhiteSpace($maxCases)) { $maxCases = "5" }
+          ./scripts/run-agent-evals.ps1 -EnvName "brk241-dev" -FieldOpsThreshold ([double]$field) -FibeyThreshold ([double]$fibey) -MaxCasesPerAgent ([int]$maxCases)
+
+      - name: Red-team gate (threshold)
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_redteam == 'true' }}
+        shell: pwsh
+        run: |
+          $rt = "${{ github.event.inputs.redteam_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($rt)) { $rt = "0.75" }
+          ./scripts/run-red-team.ps1 -EnvName "brk241-dev" -FieldOpsThreshold ([double]$rt) -FibeyThreshold ([double]$rt)
+
+      - name: Export MAF observability telemetry
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_observability == 'true' }}
+        shell: pwsh
+        run: ./scripts/show-maf-observability.ps1 -EnvName "brk241-dev"
+
+      - name: Upload DEV artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-artifacts
+          path: artifacts
+          if-no-files-found: ignore
+
+  deploy-test:
+    name: Deploy + test + eval (TEST)
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: test
+    env:
+      WEBIQ_API_KEY: ${{ secrets.WEBIQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup azd
+        uses: Azure/setup-azd@v2
+
+      - name: Install azd extensions
+        run: |
+          azd extension install azure.ai.agents --force
+          azd extension install azure.ai.toolboxes --force
+
+      - name: Select/create azd env
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_NAME="brk241-test"
+          if azd env list --output json | jq -e ".[] | select(.name == \"$ENV_NAME\")" >/dev/null; then
+            azd env select "$ENV_NAME"
+          else
+            azd env new "$ENV_NAME" --no-prompt
+          fi
+          LOCATION="${{ github.event.inputs.location }}"
+          if [[ -z "$LOCATION" ]]; then LOCATION="eastus2"; fi
+          azd env set AZURE_LOCATION "$LOCATION"
+          azd env set AZURE_SUBSCRIPTION_ID "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Provision infrastructure
+        run: azd provision --no-prompt
+
+      - name: Setup toolbox + deploy both agents
+        shell: pwsh
+        run: |
+          $toolbox = "${{ github.event.inputs.toolbox_name }}"
+          if ([string]::IsNullOrWhiteSpace($toolbox)) { $toolbox = "shared-agent-tools" }
+          ./scripts/setup-toolbox.ps1 -EnvName "brk241-test" -ToolboxName $toolbox -DeployAgents
+
+      - name: Validate toolbox endpoint wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          for agent in field-ops-agent fibey-coordinator; do
+            endpoint="$(azd ai agent show "$agent" --output json | jq -r '.definition.environment_variables.TOOLBOX_ENDPOINT // empty')"
+            if [[ -z "$endpoint" ]]; then
+              echo "::error::TOOLBOX_ENDPOINT is empty for $agent. Toolbox wiring is required after deploy."
+              exit 1
+            fi
+            if [[ "$endpoint" != *"/toolboxes/"* ]]; then
+              echo "::error::TOOLBOX_ENDPOINT for $agent does not look like a toolbox MCP endpoint: $endpoint"
+              exit 1
+            fi
+            echo "$agent TOOLBOX_ENDPOINT=$endpoint"
+          done
+
+      - name: Smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          azd ai agent invoke field-ops-agent --new-session --new-conversation "What repair procedure should I follow for a QSFP-DD transceiver replacement?"
+          azd ai agent invoke fibey-coordinator --protocol responses --new-session --new-conversation "What active incidents do we have across all sites?"
+
+      - name: Evaluation gate (threshold)
+        shell: pwsh
+        run: |
+          $field = "${{ github.event.inputs.field_ops_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($field)) { $field = "0.70" }
+          $fibey = "${{ github.event.inputs.fibey_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($fibey)) { $fibey = "0.70" }
+          $maxCases = "${{ github.event.inputs.max_eval_cases }}"
+          if ([string]::IsNullOrWhiteSpace($maxCases)) { $maxCases = "5" }
+          ./scripts/run-agent-evals.ps1 -EnvName "brk241-test" -FieldOpsThreshold ([double]$field) -FibeyThreshold ([double]$fibey) -MaxCasesPerAgent ([int]$maxCases)
+
+      - name: Red-team gate (threshold)
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_redteam == 'true' }}
+        shell: pwsh
+        run: |
+          $rt = "${{ github.event.inputs.redteam_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($rt)) { $rt = "0.75" }
+          ./scripts/run-red-team.ps1 -EnvName "brk241-test" -FieldOpsThreshold ([double]$rt) -FibeyThreshold ([double]$rt)
+
+      - name: Upload TEST artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts
+          path: artifacts
+          if-no-files-found: ignore
+
+  deploy-prod:
+    name: Deploy + test + eval (PROD)
+    needs: deploy-test
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      WEBIQ_API_KEY: ${{ secrets.WEBIQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup azd
+        uses: Azure/setup-azd@v2
+
+      - name: Install azd extensions
+        run: |
+          azd extension install azure.ai.agents --force
+          azd extension install azure.ai.toolboxes --force
+
+      - name: Select/create azd env
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_NAME="brk241-prod"
+          if azd env list --output json | jq -e ".[] | select(.name == \"$ENV_NAME\")" >/dev/null; then
+            azd env select "$ENV_NAME"
+          else
+            azd env new "$ENV_NAME" --no-prompt
+          fi
+          LOCATION="${{ github.event.inputs.location }}"
+          if [[ -z "$LOCATION" ]]; then LOCATION="eastus2"; fi
+          azd env set AZURE_LOCATION "$LOCATION"
+          azd env set AZURE_SUBSCRIPTION_ID "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Provision infrastructure
+        run: azd provision --no-prompt
+
+      - name: Setup toolbox + deploy both agents
+        shell: pwsh
+        run: |
+          $toolbox = "${{ github.event.inputs.toolbox_name }}"
+          if ([string]::IsNullOrWhiteSpace($toolbox)) { $toolbox = "shared-agent-tools" }
+          ./scripts/setup-toolbox.ps1 -EnvName "brk241-prod" -ToolboxName $toolbox -DeployAgents
+
+      - name: Validate toolbox endpoint wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          for agent in field-ops-agent fibey-coordinator; do
+            endpoint="$(azd ai agent show "$agent" --output json | jq -r '.definition.environment_variables.TOOLBOX_ENDPOINT // empty')"
+            if [[ -z "$endpoint" ]]; then
+              echo "::error::TOOLBOX_ENDPOINT is empty for $agent. Toolbox wiring is required after deploy."
+              exit 1
+            fi
+            if [[ "$endpoint" != *"/toolboxes/"* ]]; then
+              echo "::error::TOOLBOX_ENDPOINT for $agent does not look like a toolbox MCP endpoint: $endpoint"
+              exit 1
+            fi
+            echo "$agent TOOLBOX_ENDPOINT=$endpoint"
+          done
+
+      - name: Smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          azd ai agent invoke field-ops-agent --new-session --new-conversation "Any P1 work orders open right now?"
+          azd ai agent invoke fibey-coordinator --protocol responses --new-session --new-conversation "Escalate the Quincy North optical power issue - SLA at risk"
+
+      - name: Evaluation gate (threshold)
+        shell: pwsh
+        run: |
+          $field = "${{ github.event.inputs.field_ops_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($field)) { $field = "0.70" }
+          $fibey = "${{ github.event.inputs.fibey_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($fibey)) { $fibey = "0.70" }
+          $maxCases = "${{ github.event.inputs.max_eval_cases }}"
+          if ([string]::IsNullOrWhiteSpace($maxCases)) { $maxCases = "5" }
+          ./scripts/run-agent-evals.ps1 -EnvName "brk241-prod" -FieldOpsThreshold ([double]$field) -FibeyThreshold ([double]$fibey) -MaxCasesPerAgent ([int]$maxCases)
+
+      - name: Red-team gate (threshold)
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_redteam == 'true' }}
+        shell: pwsh
+        run: |
+          $rt = "${{ github.event.inputs.redteam_threshold }}"
+          if ([string]::IsNullOrWhiteSpace($rt)) { $rt = "0.75" }
+          ./scripts/run-red-team.ps1 -EnvName "brk241-prod" -FieldOpsThreshold ([double]$rt) -FibeyThreshold ([double]$rt)
+
+      - name: Upload PROD artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-artifacts
+          path: artifacts
+          if-no-files-found: ignore

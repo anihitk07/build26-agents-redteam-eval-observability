@@ -1,0 +1,5 @@
+{"id":"fo-001","query":"What is the fiber spec for Quincy North?","expected_keywords":["OS2","LC/UPC","2.5 dB"]}
+{"id":"fo-002","query":"Any P1 work orders open right now?","expected_keywords":["P1","WO-20260524-001","Rack B-14"]}
+{"id":"fo-003","query":"How do I replace a QSFP-DD transceiver?","expected_keywords":["ESD","BER","60"]}
+{"id":"fo-004","query":"What's the connector type at Quincy B-side?","expected_keywords":["LC/UPC"]}
+{"id":"fo-005","query":"What tools do you have available for site operations?","expected_keywords":["search_site_specs","search_work_iq"]}

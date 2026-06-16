@@ -22,7 +22,11 @@ template:
   environment_variables:
     - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
       value: "{{AZURE_AI_MODEL_DEPLOYMENT_NAME}}"
+    - name: TOOLBOX_ENDPOINT
+      value: ""
+    - name: TOOLBOX_FEATURES
+      value: "Toolboxes=V1Preview"
 resources:
   - kind: model
-    id: gpt-5
+    id: gpt-5.4
     name: AZURE_AI_MODEL_DEPLOYMENT_NAME
