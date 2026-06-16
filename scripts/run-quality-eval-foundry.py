@@ -30,6 +30,7 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled", "cancelled"}
 POLL_INTERVAL_SECONDS = 10
 POLL_TIMEOUT_SECONDS = 20 * 60
 NO_TRACE_ERROR_SNIPPET = "No trace data found"
+OPENAI_USER_ROLE = "Cognitive Services OpenAI User"
 DEFAULT_EVALUATORS = [
     "intent_resolution",
     "task_adherence",
@@ -174,9 +175,11 @@ def _collect_output_items(openai_client: Any, eval_id: str, run_id: str) -> list
     return list(openai_client.evals.runs.output_items.list(run_id=run_id, eval_id=eval_id))
 
 
-def _extract_first_evaluator_error(output_items: list[Any]) -> str:
+def _extract_evaluator_error_messages(output_items: list[Any]) -> list[str]:
+    messages: list[str] = []
     for item in output_items:
-        results = item.get("results") if isinstance(item, dict) else None
+        normalized_item = _to_json(item)
+        results = normalized_item.get("results") if isinstance(normalized_item, dict) else None
         if not isinstance(results, list):
             continue
         for result in results:
@@ -188,48 +191,102 @@ def _extract_first_evaluator_error(output_items: list[Any]) -> str:
                 continue
             message = error.get("message")
             if isinstance(message, str) and message.strip():
-                return message.strip()
-    return ""
+                messages.append(message.strip())
+    return messages
 
 
-def _build_openai_user_role_fix(
-    permission_error_message: str,
-    subscription_id: str,
-    resource_group: str,
-    account_name: str,
-) -> str:
-    if not permission_error_message:
+def _extract_permission_principal_ids(error_messages: list[str]) -> list[str]:
+    principal_ids: list[str] = []
+    seen: set[str] = set()
+    for message in error_messages:
+        if "lacks the required data action" not in message:
+            continue
+        match = re.search(r"principal `([^`]+)`", message)
+        if not match:
+            continue
+        principal_id = match.group(1).strip()
+        if principal_id and principal_id not in seen:
+            seen.add(principal_id)
+            principal_ids.append(principal_id)
+    return principal_ids
+
+
+def _build_openai_user_role_fix(permission_error_message: str, account_scope: str) -> str:
+    if not permission_error_message or not account_scope:
         return ""
     if "lacks the required data action" not in permission_error_message:
         return ""
 
     match = re.search(r"principal `([^`]+)`", permission_error_message)
     principal_id = match.group(1) if match else "<principal-object-id>"
-    principal_type_match = re.search(r"has type '([^']+)'", permission_error_message, flags=re.IGNORECASE)
-    principal_type = principal_type_match.group(1) if principal_type_match else ""
-    allowed_types = {"User", "ServicePrincipal", "Group", "ForeignGroup", "Device", "MSI"}
-    assignee_type_arg = (
-        f"--assignee-principal-type {principal_type}"
-        if principal_type in allowed_types
-        else ""
-    )
-    if not (subscription_id and resource_group and account_name):
-        return (
-            "Grant 'Cognitive Services OpenAI User' to the principal shown in the error "
-            f"({principal_id}) on the Azure AI account scope, then rerun."
-        )
-
-    scope = (
-        f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
-        f"/providers/Microsoft.CognitiveServices/accounts/{account_name}"
-    )
     return (
         "Evaluator permission fix required. Run:\n"
         f"az role assignment create --assignee-object-id {principal_id} "
-        f"{assignee_type_arg} "
-        "--role \"Cognitive Services OpenAI User\" "
-        f"--scope \"{scope}\""
+        "--assignee-principal-type ServicePrincipal "
+        f"--role \"{OPENAI_USER_ROLE}\" "
+        f"--scope \"{account_scope}\""
     )
+
+
+def _ensure_openai_user_role(principal_id: str, account_scope: str) -> bool:
+    existing = subprocess.run(
+        [
+            "az",
+            "role",
+            "assignment",
+            "list",
+            "--assignee-object-id",
+            principal_id,
+            "--scope",
+            account_scope,
+            "--role",
+            OPENAI_USER_ROLE,
+            "--query",
+            "[0].id",
+            "-o",
+            "tsv",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if existing.returncode == 0 and existing.stdout.strip():
+        return False
+    if existing.returncode != 0:
+        detail = (existing.stderr or existing.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to query existing OpenAI role assignment for principal {principal_id}: {detail}"
+        )
+
+    create = subprocess.run(
+        [
+            "az",
+            "role",
+            "assignment",
+            "create",
+            "--assignee-object-id",
+            principal_id,
+            "--assignee-principal-type",
+            "ServicePrincipal",
+            "--role",
+            OPENAI_USER_ROLE,
+            "--scope",
+            account_scope,
+            "-o",
+            "none",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if create.returncode == 0:
+        return True
+
+    detail = ((create.stderr or "") + "\n" + (create.stdout or "")).strip()
+    if "already exists" in detail.lower():
+        return False
+
+    raise RuntimeError(f"Failed to create OpenAI role assignment for principal {principal_id}: {detail}")
 
 
 def main() -> int:
@@ -248,7 +305,19 @@ def main() -> int:
         default=45,
         help="Wait before retry after seeding traces",
     )
+    parser.add_argument(
+        "--no-auto-fix-permission-errors",
+        action="store_true",
+        help="Disable auto-granting OpenAI role when evaluator permission errors occur.",
+    )
+    parser.add_argument(
+        "--permission-retry-wait-seconds",
+        type=int,
+        default=20,
+        help="Wait before retry after auto-fixing evaluator permissions.",
+    )
     args = parser.parse_args()
+    auto_fix_permission_errors = not args.no_auto_fix_permission_errors
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     artifacts_dir = repo_root / "artifacts" / "eval"
@@ -268,6 +337,12 @@ def main() -> int:
     subscription_id = env_map.get("AZURE_SUBSCRIPTION_ID", "")
     resource_group = env_map.get("AZURE_RESOURCE_GROUP", "")
     account_name = env_map.get("AZURE_AI_ACCOUNT_NAME", "")
+    account_scope = env_map.get("AZURE_AI_ACCOUNT_ID", "")
+    if not account_scope and subscription_id and resource_group and account_name:
+        account_scope = (
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.CognitiveServices/accounts/{account_name}"
+        )
 
     agents = [
         AgentConfig(
@@ -308,6 +383,7 @@ def main() -> int:
         )
         error_message = _get_error_message(eval_run)
         retried_after_seed = False
+        retried_after_permission_fix = False
 
         if str(getattr(eval_run, "status", "")).lower() == "failed" and NO_TRACE_ERROR_SNIPPET.lower() in error_message.lower():
             _seed_agent_trace(agent=agent, env_name=resolved_env_name)
@@ -339,12 +415,50 @@ def main() -> int:
 
         result_counts = _to_json(getattr(eval_run, "result_counts", None))
         errored_count = int((result_counts or {}).get("errored", 0)) if isinstance(result_counts, dict) else 0
-        first_eval_error = _extract_first_evaluator_error(output_items)
+        evaluator_errors = _extract_evaluator_error_messages(output_items)
+        first_eval_error = evaluator_errors[0] if evaluator_errors else ""
+        permission_principals = _extract_permission_principal_ids(evaluator_errors)
+
+        if (
+            auto_fix_permission_errors
+            and str(getattr(eval_run, "status", "")).lower() == "completed"
+            and errored_count > 0
+            and account_scope
+            and permission_principals
+        ):
+            for principal_id in permission_principals:
+                was_created = _ensure_openai_user_role(principal_id=principal_id, account_scope=account_scope)
+                action = "added" if was_created else "already present"
+                print(f"[{agent.name}] evaluator RBAC {action}: principal={principal_id}")
+
+            print(
+                f"[{agent.name}] waiting {args.permission_retry_wait_seconds}s after evaluator RBAC fix before retry..."
+            )
+            time.sleep(args.permission_retry_wait_seconds)
+            eval_run = _run_eval(
+                openai_client=openai_client,
+                eval_id=eval_id,
+                agent_name=agent.name,
+                lookback_hours=args.lookback_hours,
+                max_traces=args.max_traces,
+                run_name_prefix=f"{agent.name}-quality-permission-retry",
+            )
+            retried_after_permission_fix = True
+            status = str(getattr(eval_run, "status", ""))
+            print(f"[{agent.name}] run_id: {eval_run.id} status={status}")
+            if getattr(eval_run, "report_url", None):
+                print(f"[{agent.name}] report: {eval_run.report_url}")
+
+            output_items = _collect_output_items(openai_client=openai_client, eval_id=eval_id, run_id=eval_run.id)
+            output_items_path.write_text(json.dumps(_to_json(output_items), indent=2), encoding="utf-8")
+            result_counts = _to_json(getattr(eval_run, "result_counts", None))
+            errored_count = int((result_counts or {}).get("errored", 0)) if isinstance(result_counts, dict) else 0
+            evaluator_errors = _extract_evaluator_error_messages(output_items)
+            first_eval_error = evaluator_errors[0] if evaluator_errors else ""
+
         role_fix = _build_openai_user_role_fix(
             permission_error_message=first_eval_error,
-            subscription_id=subscription_id,
-            resource_group=resource_group,
-            account_name=account_name,
+            account_scope=account_scope,
         )
 
         run_summaries.append(
@@ -360,6 +474,7 @@ def main() -> int:
                 "report_url": getattr(eval_run, "report_url", None),
                 "error": _to_json(getattr(eval_run, "error", None)),
                 "retried_after_seed": retried_after_seed,
+                "retried_after_permission_fix": retried_after_permission_fix,
                 "output_items_path": str(output_items_path),
                 "first_evaluator_error": first_eval_error,
                 "suggested_role_fix": role_fix,

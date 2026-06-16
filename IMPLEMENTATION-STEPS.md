@@ -115,6 +115,9 @@ azd ai toolbox show shared-agent-tools --output json
   -MaxCasesPerAgent 5
 ```
 
+Behavior note:
+- Foundry quality eval now auto-heals evaluator RBAC at runtime by parsing evaluator permission errors, granting `Cognitive Services OpenAI User` to the reported principal on the AI account scope, then retrying once.
+
 Optional parameters:
 
 ```powershell
@@ -131,6 +134,9 @@ Optional parameters:
 ```powershell
 python .\scripts\run-quality-eval-foundry.py --env-name "<your-env>" --lookback-hours 2 --max-traces 20
 ```
+
+Optional:
+- Disable auto-heal for debugging: `--no-auto-fix-permission-errors`
 
 ## 7. Export observability snapshot
 
