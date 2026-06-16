@@ -191,7 +191,11 @@ try {
 
     if ($needsCreate) {
         $spec = New-ToolboxSpec -ApiKey $WebIqApiKey -WebIqServerUrl $webIqServerUrl
-        $tmpSpec = Join-Path $env:TEMP "toolbox-$ToolboxName.json"
+        $tmpDir = [System.IO.Path]::GetTempPath()
+        if ([string]::IsNullOrWhiteSpace($tmpDir)) {
+            throw "Could not resolve a temporary directory for toolbox spec creation."
+        }
+        $tmpSpec = Join-Path $tmpDir ("toolbox-{0}-{1}.json" -f $ToolboxName, [guid]::NewGuid().ToString("N"))
         $spec | ConvertTo-Json -Depth 10 | Set-Content -Path $tmpSpec -Encoding UTF8
         try {
             Write-Host "Creating toolbox '$ToolboxName'..."
@@ -216,8 +220,8 @@ try {
         Write-Host ""
         Write-Host "Redeploying agents with toolbox endpoint..."
 
-        $fieldOpsYaml = Join-Path $RepoRoot "src\field-ops-agent\agent.yaml"
-        $fibeyYaml = Join-Path $RepoRoot "src\fibey-coordinator\agent.yaml"
+        $fieldOpsYaml = Join-Path (Join-Path (Join-Path $RepoRoot "src") "field-ops-agent") "agent.yaml"
+        $fibeyYaml = Join-Path (Join-Path (Join-Path $RepoRoot "src") "fibey-coordinator") "agent.yaml"
         $original = @{
             $fieldOpsYaml = Get-Content -Path $fieldOpsYaml -Raw -Encoding UTF8
             $fibeyYaml = Get-Content -Path $fibeyYaml -Raw -Encoding UTF8
