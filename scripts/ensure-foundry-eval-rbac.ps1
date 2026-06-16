@@ -18,6 +18,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Convert-ToTrimmedText {
+    param([Parameter(ValueFromPipeline = $true)] $Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+    if ($Value -is [System.Array]) {
+        return (($Value | ForEach-Object { "$_" }) -join [Environment]::NewLine).Trim()
+    }
+    return ("$Value").Trim()
+}
+
 function Get-AzdEnvMap {
     param([string]$WorkingDirectory)
 
@@ -45,14 +57,14 @@ function Get-ResourcePrincipalId {
         throw "Resource ID is required."
     }
 
-    $principalObjectId = (& az resource show --ids $ResourceId --query "identity.principalId" -o tsv 2>$null).Trim()
+    $principalObjectId = Convert-ToTrimmedText (& az resource show --ids $ResourceId --query "identity.principalId" -o tsv 2>$null)
     if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($principalObjectId)) {
         return $principalObjectId
     }
 
     foreach ($apiVersion in @("2025-06-01", "2025-04-01-preview")) {
         $url = "https://management.azure.com$ResourceId?api-version=$apiVersion"
-        $principalObjectId = (& az rest --method get --url $url --query "identity.principalId" -o tsv 2>$null).Trim()
+        $principalObjectId = Convert-ToTrimmedText (& az rest --method get --url $url --query "identity.principalId" -o tsv 2>$null)
         if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($principalObjectId)) {
             return $principalObjectId
         }
@@ -68,12 +80,12 @@ function Ensure-RoleAssignment {
         [string]$Role
     )
 
-    $existingAssignmentId = (& az role assignment list `
+    $existingAssignmentId = Convert-ToTrimmedText (& az role assignment list `
         --assignee-object-id $PrincipalObjectId `
         --scope $Scope `
         --role $Role `
         --query "[0].id" `
-        -o tsv).Trim()
+        -o tsv)
 
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to query existing role assignments for principal '$PrincipalObjectId'."
