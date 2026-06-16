@@ -198,6 +198,10 @@ AppEvents
         Write-Host "Dashboard JSON ready for import:"
         Write-Host "  $GrafanaDashboardJson"
     }
+
+    # Keep the script success-shaped when all required work completed.
+    # Prior external command exit codes can leak into process exit status on CI shells.
+    exit 0
 }
 finally {
     Pop-Location
