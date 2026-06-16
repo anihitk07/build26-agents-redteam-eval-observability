@@ -181,6 +181,10 @@ gh workflow run "Agents Stage Rollout (dev-test-prod)" `
   -f redteam_threshold=0.75
 ```
 
+Workflow execution order note:
+- `Evaluation gate` and `Red-team gate` now run with local threshold checks first (`-PublishToFoundryPortal $false`).
+- Foundry quality/red-team publish runs are moved to end-of-stage as non-blocking steps right before artifact upload.
+
 ## 11. Evaluator RBAC fix (workflow auto + manual fallback)
 
 The staged workflow now runs this automatically after `azd provision` in each stage:
@@ -211,6 +215,7 @@ The workflow now includes these reliability fixes:
 - Toolbox endpoint validation after deploy.
 - Automatic evaluator RBAC assignment right after infra provision (`ensure-foundry-eval-rbac.ps1`).
 - Azure IDs exported at job scope (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) to satisfy azd postdeploy hooks.
+- Foundry eval publish moved to end-of-stage non-blocking steps so local threshold gates fail/pass independently.
 
 If troubleshooting, verify the workflow file has all of the above in `deploy-dev`, `deploy-test`, and `deploy-prod`.
 
