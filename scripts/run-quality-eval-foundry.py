@@ -31,6 +31,12 @@ POLL_INTERVAL_SECONDS = 10
 POLL_TIMEOUT_SECONDS = 20 * 60
 NO_TRACE_ERROR_SNIPPET = "No trace data found"
 OPENAI_USER_ROLE = "Cognitive Services OpenAI User"
+PERMISSION_ERROR_SNIPPETS = (
+    "principal does not have access to api/operation",
+    "lacks the required data action",
+    "permissiondenied",
+    "authenticationerror",
+)
 DEFAULT_EVALUATORS = [
     "intent_resolution",
     "task_adherence",
@@ -211,6 +217,14 @@ def _extract_permission_principal_ids(error_messages: list[str]) -> list[str]:
     return principal_ids
 
 
+def _contains_permission_error(error_messages: list[str]) -> bool:
+    for message in error_messages:
+        lower = message.lower()
+        if any(snippet in lower for snippet in PERMISSION_ERROR_SNIPPETS):
+            return True
+    return False
+
+
 def _build_openai_user_role_fix(permission_error_message: str, account_scope: str) -> str:
     if not permission_error_message or not account_scope:
         return ""
@@ -313,8 +327,14 @@ def main() -> int:
     parser.add_argument(
         "--permission-retry-wait-seconds",
         type=int,
-        default=20,
+        default=45,
         help="Wait before retry after auto-fixing evaluator permissions.",
+    )
+    parser.add_argument(
+        "--permission-max-retries",
+        type=int,
+        default=3,
+        help="Maximum retries after auto-fixing evaluator permissions.",
     )
     args = parser.parse_args()
     auto_fix_permission_errors = not args.no_auto_fix_permission_errors
@@ -367,6 +387,7 @@ def main() -> int:
 
     run_summaries: list[dict[str, Any]] = []
     failures: list[str] = []
+    known_permission_principals: set[str] = set()
 
     for agent in agents:
         print(f"\n[{agent.name}] creating quality eval definition...")
@@ -418,43 +439,68 @@ def main() -> int:
         evaluator_errors = _extract_evaluator_error_messages(output_items)
         first_eval_error = evaluator_errors[0] if evaluator_errors else ""
         permission_principals = _extract_permission_principal_ids(evaluator_errors)
+        if permission_principals:
+            known_permission_principals.update(permission_principals)
+        has_permission_error = _contains_permission_error(evaluator_errors)
 
         if (
             auto_fix_permission_errors
             and str(getattr(eval_run, "status", "")).lower() == "completed"
             and errored_count > 0
             and account_scope
-            and permission_principals
+            and has_permission_error
         ):
-            for principal_id in permission_principals:
-                was_created = _ensure_openai_user_role(principal_id=principal_id, account_scope=account_scope)
-                action = "added" if was_created else "already present"
-                print(f"[{agent.name}] evaluator RBAC {action}: principal={principal_id}")
+            retry_principals = set(permission_principals) if permission_principals else set(known_permission_principals)
+            for attempt in range(1, max(1, args.permission_max_retries) + 1):
+                if not retry_principals:
+                    print(
+                        f"[{agent.name}] permission errors detected but no principal IDs extracted; "
+                        "cannot auto-assign role in this attempt."
+                    )
+                    break
 
-            print(
-                f"[{agent.name}] waiting {args.permission_retry_wait_seconds}s after evaluator RBAC fix before retry..."
-            )
-            time.sleep(args.permission_retry_wait_seconds)
-            eval_run = _run_eval(
-                openai_client=openai_client,
-                eval_id=eval_id,
-                agent_name=agent.name,
-                lookback_hours=args.lookback_hours,
-                max_traces=args.max_traces,
-                run_name_prefix=f"{agent.name}-quality-permission-retry",
-            )
-            retried_after_permission_fix = True
-            status = str(getattr(eval_run, "status", ""))
-            print(f"[{agent.name}] run_id: {eval_run.id} status={status}")
-            if getattr(eval_run, "report_url", None):
-                print(f"[{agent.name}] report: {eval_run.report_url}")
+                for principal_id in sorted(retry_principals):
+                    was_created = _ensure_openai_user_role(principal_id=principal_id, account_scope=account_scope)
+                    action = "added" if was_created else "already present"
+                    print(f"[{agent.name}] evaluator RBAC {action}: principal={principal_id}")
 
-            output_items = _collect_output_items(openai_client=openai_client, eval_id=eval_id, run_id=eval_run.id)
-            output_items_path.write_text(json.dumps(_to_json(output_items), indent=2), encoding="utf-8")
-            result_counts = _to_json(getattr(eval_run, "result_counts", None))
-            errored_count = int((result_counts or {}).get("errored", 0)) if isinstance(result_counts, dict) else 0
-            evaluator_errors = _extract_evaluator_error_messages(output_items)
-            first_eval_error = evaluator_errors[0] if evaluator_errors else ""
+                wait_seconds = args.permission_retry_wait_seconds * attempt
+                print(
+                    f"[{agent.name}] waiting {wait_seconds}s for RBAC propagation before permission retry {attempt}..."
+                )
+                time.sleep(wait_seconds)
+
+                eval_run = _run_eval(
+                    openai_client=openai_client,
+                    eval_id=eval_id,
+                    agent_name=agent.name,
+                    lookback_hours=args.lookback_hours,
+                    max_traces=args.max_traces,
+                    run_name_prefix=f"{agent.name}-quality-permission-retry-{attempt}",
+                )
+                retried_after_permission_fix = True
+                status = str(getattr(eval_run, "status", ""))
+                print(f"[{agent.name}] run_id: {eval_run.id} status={status}")
+                if getattr(eval_run, "report_url", None):
+                    print(f"[{agent.name}] report: {eval_run.report_url}")
+
+                output_items = _collect_output_items(openai_client=openai_client, eval_id=eval_id, run_id=eval_run.id)
+                output_items_path.write_text(json.dumps(_to_json(output_items), indent=2), encoding="utf-8")
+                result_counts = _to_json(getattr(eval_run, "result_counts", None))
+                errored_count = int((result_counts or {}).get("errored", 0)) if isinstance(result_counts, dict) else 0
+                evaluator_errors = _extract_evaluator_error_messages(output_items)
+                first_eval_error = evaluator_errors[0] if evaluator_errors else ""
+
+                new_principals = _extract_permission_principal_ids(evaluator_errors)
+                if new_principals:
+                    known_permission_principals.update(new_principals)
+                    retry_principals.update(new_principals)
+
+                if errored_count == 0:
+                    break
+
+                if not _contains_permission_error(evaluator_errors):
+                    break
 
         role_fix = _build_openai_user_role_fix(
             permission_error_message=first_eval_error,
