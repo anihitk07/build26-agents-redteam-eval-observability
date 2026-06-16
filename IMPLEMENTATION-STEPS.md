@@ -183,3 +183,96 @@ az role assignment create `
   --role "Cognitive Services OpenAI User" `
   --scope "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.CognitiveServices/accounts/<ai-account-name>"
 ```
+
+## 12. GitHub Actions workflow reliability checks
+
+The workflow now includes these reliability fixes:
+- Explicit `azd auth login` using federated OIDC in each stage.
+- Python dependency install for Foundry eval scripts.
+- Toolbox endpoint validation after deploy.
+- Azure IDs exported at job scope (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) to satisfy azd postdeploy hooks.
+
+If troubleshooting, verify the workflow file has all of the above in `deploy-dev`, `deploy-test`, and `deploy-prod`.
+
+## 13. Common failures and exact fixes
+
+### A) OIDC federation error (AADSTS700213 - no matching federated identity)
+
+Symptom:
+- Subject mismatch like `repo:...:environment:dev`
+
+Fix:
+- Create federated credentials with full subject format:
+  - `repo:anihitk07/build26-agents-redteam-eval-observability:environment:dev`
+  - `repo:anihitk07/build26-agents-redteam-eval-observability:environment:test`
+  - `repo:anihitk07/build26-agents-redteam-eval-observability:environment:prod`
+
+PowerShell-safe subject construction (important):
+
+```powershell
+$repoFull = "anihitk07/build26-agents-redteam-eval-observability"
+$subject = ('repo:{0}:environment:{1}' -f $repoFull, $envName)
+```
+
+### B) `azd provision` fails with insufficient permissions
+
+Symptom:
+- Missing `Microsoft.Resources/deployments/validate/action` at subscription scope.
+
+Fix:
+- Grant service principal these roles at subscription scope:
+  - `Contributor`
+  - `User Access Administrator` (required when templates create role assignments)
+
+```powershell
+$scope = "/subscriptions/<subscription-id>"
+az role assignment create --assignee-object-id <sp-object-id> --assignee-principal-type ServicePrincipal --role "Contributor" --scope $scope
+az role assignment create --assignee-object-id <sp-object-id> --assignee-principal-type ServicePrincipal --role "User Access Administrator" --scope $scope
+```
+
+### C) `setup-toolbox.ps1` fails on Linux with null path
+
+Symptom:
+- `Cannot bind argument to parameter 'Path' because it is null.`
+
+Fix applied:
+- Script uses `[System.IO.Path]::GetTempPath()` instead of `$env:TEMP`.
+- Script uses cross-platform `Join-Path` patterns for `agent.yaml` files.
+
+### D) Deploy fails with `FOUNDRY_PROJECT_ENDPOINT is required`
+
+Symptom:
+- During `azd deploy <service>`, environment variable missing.
+
+Fix applied:
+- `setup-toolbox.ps1` now sets:
+
+```powershell
+azd env set FOUNDRY_PROJECT_ENDPOINT "<project-endpoint>"
+```
+
+### E) Deploy fails in postdeploy with `AZURE_TENANT_ID is not set in the environment`
+
+Symptom:
+- Happens after service deploy in azd event hooks.
+
+Fix applied:
+- Workflow exports `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` at job env scope for all stages.
+
+### F) Foundry quality eval shows `Partial` and 0 scored
+
+Symptom:
+- Evaluations run appears in UI but metrics show 0/0 with evaluator errors.
+
+Fix:
+- Grant the principal from the evaluator error:
+  - Role: `Cognitive Services OpenAI User`
+  - Scope: AI account resource id
+
+```powershell
+az role assignment create `
+  --assignee-object-id <principal-object-id-from-eval-error> `
+  --assignee-principal-type User `
+  --role "Cognitive Services OpenAI User" `
+  --scope "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<ai-account-name>"
+```
