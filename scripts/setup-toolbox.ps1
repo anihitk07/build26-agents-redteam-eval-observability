@@ -208,6 +208,8 @@ try {
 
     $toolboxEndpoint = "$projectEndpoint/toolboxes/$ToolboxName/mcp?api-version=v1"
 
+    # Some deploy flows require FOUNDRY_PROJECT_ENDPOINT even when AZURE_AI_PROJECT_ENDPOINT exists.
+    & azd env set FOUNDRY_PROJECT_ENDPOINT $projectEndpoint | Out-Host
     & azd env set FIELD_OPS_TOOLBOX_ENDPOINT $toolboxEndpoint | Out-Host
     & azd env set FIBEY_TOOLBOX_ENDPOINT $toolboxEndpoint | Out-Host
     & azd env set TOOLBOX_FEATURES "Toolboxes=V1Preview" | Out-Host
