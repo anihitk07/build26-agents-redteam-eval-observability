@@ -38,15 +38,17 @@ Create federated credentials for GitHub environments `dev`, `test`, `prod`:
 ```powershell
 $issuer = "https://token.actions.githubusercontent.com"
 $aud = @("api://AzureADTokenExchange")
+$repoFull = "anihitk07/build26-agents-redteam-eval-observability"
 
 foreach ($envName in @("dev","test","prod")) {
-  $subject = "repo:$repo:environment:$envName"
+  # Use -f formatting to avoid PowerShell parsing issues with colon-delimited strings.
+  $subject = ('repo:{0}:environment:{1}' -f $repoFull, $envName)
   $params = @{
-    name = "gh-$envName"
+    name = "gh-$envName-env"
     issuer = $issuer
     subject = $subject
     audiences = $aud
-    description = "GitHub Actions OIDC for $envName"
+    description = "GitHub OIDC for $envName environment"
   } | ConvertTo-Json -Depth 5
 
   $tmp = New-TemporaryFile
@@ -55,6 +57,17 @@ foreach ($envName in @("dev","test","prod")) {
   Remove-Item $tmp -Force
 }
 ```
+
+Verify subjects:
+
+```powershell
+az ad app federated-credential list --id $appObjectId --query "[].{name:name,subject:subject,issuer:issuer,aud:audiences}" -o table
+```
+
+Expected subject values:
+- `repo:anihitk07/build26-agents-redteam-eval-observability:environment:dev`
+- `repo:anihitk07/build26-agents-redteam-eval-observability:environment:test`
+- `repo:anihitk07/build26-agents-redteam-eval-observability:environment:prod`
 
 Grant Azure RBAC to the service principal at your deployment scope (resource group or subscription):
 
