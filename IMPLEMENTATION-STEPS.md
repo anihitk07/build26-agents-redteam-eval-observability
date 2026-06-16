@@ -174,7 +174,19 @@ gh workflow run "Agents Stage Rollout (dev-test-prod)" `
   -f redteam_threshold=0.75
 ```
 
-## 11. Evaluator RBAC fix (if Foundry eval shows partial/0 scored)
+## 11. Evaluator RBAC fix (workflow auto + manual fallback)
+
+The staged workflow now runs this automatically after `azd provision` in each stage:
+
+```powershell
+.\scripts\ensure-foundry-eval-rbac.ps1 -EnvName "brk241-dev"
+```
+
+It grants `Cognitive Services OpenAI User` on the AI account scope for the managed identities of:
+- `AZURE_AI_ACCOUNT_ID`
+- `AZURE_AI_PROJECT_ID`
+
+Use the manual command below only when running outside GitHub Actions or for break-glass troubleshooting.
 
 ```powershell
 az role assignment create `
@@ -190,6 +202,7 @@ The workflow now includes these reliability fixes:
 - Explicit `azd auth login` using federated OIDC in each stage.
 - Python dependency install for Foundry eval scripts.
 - Toolbox endpoint validation after deploy.
+- Automatic evaluator RBAC assignment right after infra provision (`ensure-foundry-eval-rbac.ps1`).
 - Azure IDs exported at job scope (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) to satisfy azd postdeploy hooks.
 
 If troubleshooting, verify the workflow file has all of the above in `deploy-dev`, `deploy-test`, and `deploy-prod`.
@@ -265,6 +278,8 @@ Symptom:
 - Evaluations run appears in UI but metrics show 0/0 with evaluator errors.
 
 Fix:
+- Workflow auto-remediation now runs post-provision and should prevent this in normal staged runs.
+- If this still happens, run manual RBAC assignment:
 - Grant the principal from the evaluator error:
   - Role: `Cognitive Services OpenAI User`
   - Scope: AI account resource id

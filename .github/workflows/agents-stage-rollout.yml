@@ -114,6 +114,10 @@ jobs:
       - name: Provision infrastructure
         run: azd provision --no-prompt
 
+      - name: Ensure Foundry evaluator RBAC
+        shell: pwsh
+        run: ./scripts/ensure-foundry-eval-rbac.ps1 -EnvName "brk241-dev"
+
       - name: Setup toolbox + deploy both agents
         shell: pwsh
         run: |
@@ -241,6 +245,10 @@ jobs:
       - name: Provision infrastructure
         run: azd provision --no-prompt
 
+      - name: Ensure Foundry evaluator RBAC
+        shell: pwsh
+        run: ./scripts/ensure-foundry-eval-rbac.ps1 -EnvName "brk241-test"
+
       - name: Setup toolbox + deploy both agents
         shell: pwsh
         run: |
@@ -362,6 +370,10 @@ jobs:
 
       - name: Provision infrastructure
         run: azd provision --no-prompt
+
+      - name: Ensure Foundry evaluator RBAC
+        shell: pwsh
+        run: ./scripts/ensure-foundry-eval-rbac.ps1 -EnvName "brk241-prod"
 
       - name: Setup toolbox + deploy both agents
         shell: pwsh
