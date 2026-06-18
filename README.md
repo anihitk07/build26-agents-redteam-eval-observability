@@ -4,164 +4,321 @@
 <img src="img/banner-build-26.png" alt="Microsoft Build 2026" width="1200"/>
 </p>
 
-# [Microsoft Build 2026](https://build.microsoft.com)
+# BRK241 — From Prototype to Production: Build and Run Agents at Scale
 
-## 🚀 BRK241: From Prototype to Production — Build and Run Agents at Scale
+This repository extends the Microsoft Build 2026 BRK241 sample into a production-grade **AgentOps pipeline** for two Microsoft Foundry hosted agents (`field-ops-agent` and `fibey-coordinator`).
 
-### Session Description
+It ships:
 
-Taking an AI agent from a working prototype to a reliable, scalable production
-service involves real engineering: deployment, tools, memory, long-running work,
-human oversight, and observability. This breakout walks that journey using two
-sample agents you can run yourself on **Microsoft Foundry**:
+- A **GitHub Actions workflow** (`.github/workflows/agents-stage-rollout.yml`) with governed dev / test / prod stages and required reviewers on test and prod.
+- **Golden-dataset quality evals** and **red-team safety scans** as threshold-based gates.
+- **MAF / OpenTelemetry observability** that flows into Application Insights, Azure Monitor, and a Grafana dashboard, plus eval and red-team runs published to the **Microsoft Foundry portal**.
+- A **WebIQ MCP** tool exposed through a shared **Foundry Toolbox** so both agents share a single, governed tool surface.
+- **Automatic evaluator RBAC remediation** so Foundry evaluators do not silently fail on first deploy.
 
-- **`field-ops-agent`** — a voice-enabled field technician assistant built on the
-  **Microsoft Agent Framework**, showing tools, an MCP **Toolbox** connection, an
-  optional **Microsoft Fabric** data agent, and procedural memory.
-- **`fibey-coordinator`** — a long-running network operations coordinator that
-  monitors telemetry, persists context across sessions, **scales to zero** while
-  waiting, gates actions behind **human-in-the-loop** approvals, and can work in
-  **Microsoft Teams**.
+The sections below are the exact operational steps to set the pipeline up, run each gate locally, and trigger the staged rollout.
 
-Both agents deploy with a single `azd` command, emit traces to Application
-Insights, and ship with sample tool data so they run end-to-end out of the box.
+---
 
-### 🚀 Getting started
+## 1. Prerequisites
 
-You can deploy both agents to your own Microsoft Foundry project with the Azure
-Developer CLI.
-
-**Prerequisites**
-
-- An Azure subscription with access to [Microsoft Foundry](https://learn.microsoft.com/azure/ai-foundry/)
-- [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd) v1.24+
-- The Foundry agents extension: `azd extension install azure.ai.agents`
-- Python 3.12+
-
-**Clone and deploy**
-
-```bash
-git clone https://github.com/microsoft/Build26-BRK241-from-prototype-to-production-build-and-run-agents-at-scale.git
-cd Build26-BRK241-from-prototype-to-production-build-and-run-agents-at-scale
-
-# Provision the Foundry project, model deployment, and supporting resources
-azd provision
-
-# Deploy both hosted agents
-azd deploy
+```powershell
+az login
+gh auth login
+azd auth login
+azd extension install azure.ai.agents --force
+azd extension install azure.ai.toolboxes --force
+pip install azure-ai-projects azure-identity
 ```
 
-Deploy a single agent with `azd deploy field-ops-agent` or
-`azd deploy fibey-coordinator`. Tear everything down with `azd down`.
+## 2. Configure Entra app + GitHub OIDC federation (for workflow auth)
 
-See [`src/field-ops-agent/`](src/field-ops-agent/README.md) and
-[`src/fibey-coordinator/`](src/fibey-coordinator/README.md) for per-agent details,
-example prompts, and the optional integrations (Toolbox, Fabric, Teams,
-Durable Task Scheduler).
+Set variables:
 
-### 🧠 Learning Outcomes
-
-By the end of this session, you will be able to:
-
-- Build an agent with the **Microsoft Agent Framework** and deploy it to
-  **Microsoft Foundry** as a hosted agent using the Azure Developer CLI.
-- Extend an agent with tools, **MCP/Toolbox** connections, data agents, and
-  procedural memory — and run long-running agents with persistent sessions,
-  scale-to-zero, and human-in-the-loop approvals.
-- Operate agents in production with built-in **tracing** and **evaluation**.
-
-### 💬 Keep Learning with Copilot
-
-Try these prompts with GitHub Copilot to explore the topics from this session.
-Open Copilot Chat in Visual Studio Code (`Ctrl+Alt+I` on Windows/Linux,
-`Cmd+Shift+I` on Mac), paste a prompt, and see what you learn. Connect the
-[Microsoft Learn MCP Server](#-microsoft-learn-mcp-server) for the latest official
-documentation.
-
-1. Understand the basics:
-
-```
-Explain what a hosted agent in Microsoft Foundry Agent Service is and how it differs from running an agent on my own infrastructure.
+```powershell
+$subscriptionId = "<your-subscription-id>"
+$tenantId       = "<your-tenant-id>"
+$repo           = "anihitk07/build26-agents-redteam-eval-observability"
+$appName        = "gh-build26-agents-oidc"
 ```
 
-2. Go deeper:
+Create app registration + service principal:
 
-```
-Using the Microsoft Learn MCP Server, find the latest documentation on the Microsoft Agent Framework and show me how to define a tool and run an agent loop in Python.
-```
-
-3. Build something:
-
-```
-Help me create a hosted agent with the Microsoft Agent Framework that exposes one function tool, then deploy it to Microsoft Foundry with the Azure Developer CLI.
+```powershell
+$app = az ad app create --display-name $appName --query "{appId:appId,id:id}" -o json | ConvertFrom-Json
+$clientId = $app.appId
+$appObjectId = $app.id
+$spObjectId = az ad sp create --id $clientId --query id -o tsv
 ```
 
-### 💻 Technologies Used
+Create federated credentials for GitHub environments `dev`, `test`, `prod`:
 
-1. [Microsoft Foundry — Hosted Agents](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agents)
-1. [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/)
-1. [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/)
-1. [Model Context Protocol (MCP) tools](https://learn.microsoft.com/agent-framework/agents/tools/)
-1. [Microsoft Fabric data agents](https://learn.microsoft.com/fabric/data-science/concept-data-agent)
-1. [Azure Monitor Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/app-insights-overview)
-1. [Durable Task Scheduler](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/durable-task-scheduler)
-1. [Microsoft Teams bots (Bot Framework)](https://learn.microsoft.com/azure/bot-service/)
+```powershell
+$issuer = "https://token.actions.githubusercontent.com"
+$aud = @("api://AzureADTokenExchange")
+$repoFull = "anihitk07/build26-agents-redteam-eval-observability"
 
-### 📚 Resources and Next Steps
+foreach ($envName in @("dev","test","prod")) {
+  # Use -f formatting to avoid PowerShell parsing issues with colon-delimited strings.
+  $subject = ('repo:{0}:environment:{1}' -f $repoFull, $envName)
+  $params = @{
+    name = "gh-$envName-env"
+    issuer = $issuer
+    subject = $subject
+    audiences = $aud
+    description = "GitHub OIDC for $envName environment"
+  } | ConvertTo-Json -Depth 5
 
-| Resource | Description |
-|:---------|:------------|
-| [Build 2026 — Next Steps](https://aka.ms/build26-next-steps) | Explore lab and session repos to further your learning from Microsoft Build |
-| [Quickstart: Deploy your first hosted agent](https://learn.microsoft.com/azure/foundry/agents/quickstarts/quickstart-hosted-agent) | Step-by-step quickstart for deploying a hosted agent to Microsoft Foundry |
-| [Foundry Hosted Agents with the Agent Framework](https://learn.microsoft.com/agent-framework/hosting/foundry-hosted-agent) | How the Microsoft Agent Framework hosts and runs agents on Foundry |
-| [Get started with the Agent Framework](https://learn.microsoft.com/agent-framework/get-started/) | Tutorials for building your first agent, adding tools, memory, and workflows |
-| [Watch the session recording](https://aka.ms/build26/BRK241/youtube) | Watch the recorded Microsoft Build session. |
-
-### 🌟 Microsoft Learn MCP Server
-
-The Microsoft Learn MCP Server gives your AI agent direct access to Microsoft's official documentation — grounded, up-to-date answers about the products and services covered in this session.
-
-**Visual Studio Code** — One click installation:
-
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Microsoft_Learn_MCP-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=microsoft-learn&config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Flearn.microsoft.com%2Fapi%2Fmcp%22%7D)
-
-
-**GitHub Copilot CLI** — Run this to install the Learn MCP Server as a plugin:
-```
-/plugin install microsoftdocs/mcp
+  $tmp = New-TemporaryFile
+  Set-Content -Path $tmp -Value $params -Encoding UTF8
+  az ad app federated-credential create --id $appObjectId --parameters "@$tmp"
+  Remove-Item $tmp -Force
+}
 ```
 
-For more info, other clients, and to post questions, visit the [Learn MCP Server repo](https://aka.ms/learnmcp).
+Verify subjects:
 
-## Content Owners
+```powershell
+az ad app federated-credential list --id $appObjectId --query "[].{name:name,subject:subject,issuer:issuer,aud:audiences}" -o table
+```
 
-<table>
-<tr>
-    <td align="center"><a href="http://github.com/jeffhollan">
-        <img src="https://github.com/jeffhollan.png" width="100px;" alt="Jeff Hollan"/><br />
-        <sub><b>Jeff Hollan</b></sub></a><br />
-            <a href="https://github.com/jeffhollan" title="talk">📢</a>
-    </td>
-</tr></table>
+Expected subject values:
+- `repo:anihitk07/build26-agents-redteam-eval-observability:environment:dev`
+- `repo:anihitk07/build26-agents-redteam-eval-observability:environment:test`
+- `repo:anihitk07/build26-agents-redteam-eval-observability:environment:prod`
 
-## Contributing
+Grant Azure RBAC to the service principal at your deployment scope (resource group or subscription):
 
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit [Contributor License Agreements](https://cla.opensource.microsoft.com).
+```powershell
+$scope = "/subscriptions/$subscriptionId/resourceGroups/<your-resource-group>"
+az role assignment create --assignee-object-id $spObjectId --assignee-principal-type ServicePrincipal --role "Contributor" --scope $scope
+```
 
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
+If your deployment also creates role assignments, add this too:
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+```powershell
+az role assignment create --assignee-object-id $spObjectId --assignee-principal-type ServicePrincipal --role "User Access Administrator" --scope $scope
+```
 
-## Trademarks
+Set GitHub secrets used by workflow:
 
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
-trademarks or logos is subject to and must follow
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
+```powershell
+gh secret set AZURE_CLIENT_ID --repo $repo --body $clientId
+gh secret set AZURE_TENANT_ID --repo $repo --body $tenantId
+gh secret set AZURE_SUBSCRIPTION_ID --repo $repo --body $subscriptionId
+gh secret set WEBIQ_API_KEY --repo $repo --body "<your-webiq-api-key>"
+```
+
+## 3. Select environment
+
+```powershell
+azd env select "<your-env>"
+```
+
+## 4. Setup toolbox (WebIQ) and deploy agents
+
+```powershell
+$env:WEBIQ_API_KEY = "<your-webiq-api-key>"
+.\scripts\setup-toolbox.ps1 -EnvName "<your-env>" -ToolboxName "shared-agent-tools" -DeployAgents
+azd ai toolbox show shared-agent-tools --output json
+```
+
+## 5. Run standard eval gate (local + Azure portal + Foundry quality eval UI)
+
+```powershell
+.\scripts\run-agent-evals.ps1 `
+  -EnvName "<your-env>" `
+  -FieldOpsThreshold 0.70 `
+  -FibeyThreshold 0.70 `
+  -MaxCasesPerAgent 5
+```
+
+Behavior note:
+- Foundry quality eval now auto-heals evaluator RBAC at runtime by parsing evaluator permission errors, granting `Cognitive Services OpenAI User` to the reported principal on the AI account scope, then retrying with propagation-aware backoff.
+
+Optional parameters:
+
+```powershell
+.\scripts\run-agent-evals.ps1 `
+  -EnvName "<your-env>" `
+  -PublishToFoundryPortal $true `
+  -PublishToAzurePortal $true `
+  -FailOnFoundryPortalPublishError $true `
+  -FailOnPortalPublishError $true
+```
+
+## 6. Run Foundry quality eval only
+
+```powershell
+python .\scripts\run-quality-eval-foundry.py --env-name "<your-env>" --lookback-hours 2 --max-traces 20
+```
+
+Optional:
+- Disable auto-heal for debugging: `--no-auto-fix-permission-errors`
+- Tune propagation retries: `--permission-retry-wait-seconds <seconds>` and `--permission-max-retries <count>`
+
+## 7. Export observability snapshot
+
+```powershell
+.\scripts\show-maf-observability.ps1 -EnvName "<your-env>" -Timespan PT2H
+```
+
+## 8. Run red-team gate (local + Foundry red-team + Azure portal)
+
+```powershell
+.\scripts\run-red-team.ps1 `
+  -EnvName "<your-env>" `
+  -FieldOpsThreshold 0.75 `
+  -FibeyThreshold 0.75 `
+  -MaxCasesPerAgent 8
+```
+
+## 9. Run Foundry red-team only
+
+```powershell
+python .\scripts\run-red-team-foundry.py --env-name "<your-env>"
+```
+
+## 10. Trigger staged rollout workflow (dev -> test -> prod)
+
+Required GitHub secrets:
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `WEBIQ_API_KEY`
+
+```powershell
+gh workflow run "Agents Stage Rollout (dev-test-prod)" `
+  -f location=eastus2 `
+  -f toolbox_name=shared-agent-tools `
+  -f field_ops_threshold=0.70 `
+  -f fibey_threshold=0.70 `
+  -f max_eval_cases=5 `
+  -f run_observability=true `
+  -f run_redteam=true `
+  -f redteam_threshold=0.75
+```
+
+Workflow execution order note:
+- `Evaluation gate` and `Red-team gate` now run with local threshold checks first (`-PublishToFoundryPortal $false`).
+- Foundry quality/red-team publish runs are moved to end-of-stage as non-blocking steps right before artifact upload.
+
+## 11. Evaluator RBAC fix (workflow auto + manual fallback)
+
+The staged workflow now runs this automatically after `azd provision` in each stage:
+
+```powershell
+.\scripts\ensure-foundry-eval-rbac.ps1 -EnvName "brk241-dev"
+```
+
+It grants `Cognitive Services OpenAI User` on the AI account scope for the managed identities of:
+- `AZURE_AI_ACCOUNT_ID`
+- `AZURE_AI_PROJECT_ID`
+
+Use the manual command below only when running outside GitHub Actions or for break-glass troubleshooting.
+
+```powershell
+az role assignment create `
+  --assignee-object-id <principal-object-id-from-error> `
+  --assignee-principal-type User `
+  --role "Cognitive Services OpenAI User" `
+  --scope "/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.CognitiveServices/accounts/<ai-account-name>"
+```
+
+## 12. GitHub Actions workflow reliability checks
+
+The workflow now includes these reliability fixes:
+- Explicit `azd auth login` using federated OIDC in each stage.
+- Python dependency install for Foundry eval scripts.
+- Toolbox endpoint validation after deploy.
+- Automatic evaluator RBAC assignment right after infra provision (`ensure-foundry-eval-rbac.ps1`).
+- Azure IDs exported at job scope (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) to satisfy azd postdeploy hooks.
+- Foundry eval publish moved to end-of-stage non-blocking steps so local threshold gates fail/pass independently.
+
+If troubleshooting, verify the workflow file has all of the above in `deploy-dev`, `deploy-test`, and `deploy-prod`.
+
+## 13. Common failures and exact fixes
+
+### A) OIDC federation error (AADSTS700213 - no matching federated identity)
+
+Symptom:
+- Subject mismatch like `repo:...:environment:dev`
+
+Fix:
+- Create federated credentials with full subject format:
+  - `repo:anihitk07/build26-agents-redteam-eval-observability:environment:dev`
+  - `repo:anihitk07/build26-agents-redteam-eval-observability:environment:test`
+  - `repo:anihitk07/build26-agents-redteam-eval-observability:environment:prod`
+
+PowerShell-safe subject construction (important):
+
+```powershell
+$repoFull = "anihitk07/build26-agents-redteam-eval-observability"
+$subject = ('repo:{0}:environment:{1}' -f $repoFull, $envName)
+```
+
+### B) `azd provision` fails with insufficient permissions
+
+Symptom:
+- Missing `Microsoft.Resources/deployments/validate/action` at subscription scope.
+
+Fix:
+- Grant service principal these roles at subscription scope:
+  - `Contributor`
+  - `User Access Administrator` (required when templates create role assignments)
+
+```powershell
+$scope = "/subscriptions/<subscription-id>"
+az role assignment create --assignee-object-id <sp-object-id> --assignee-principal-type ServicePrincipal --role "Contributor" --scope $scope
+az role assignment create --assignee-object-id <sp-object-id> --assignee-principal-type ServicePrincipal --role "User Access Administrator" --scope $scope
+```
+
+### C) `setup-toolbox.ps1` fails on Linux with null path
+
+Symptom:
+- `Cannot bind argument to parameter 'Path' because it is null.`
+
+Fix applied:
+- Script uses `[System.IO.Path]::GetTempPath()` instead of `$env:TEMP`.
+- Script uses cross-platform `Join-Path` patterns for `agent.yaml` files.
+
+### D) Deploy fails with `FOUNDRY_PROJECT_ENDPOINT is required`
+
+Symptom:
+- During `azd deploy <service>`, environment variable missing.
+
+Fix applied:
+- `setup-toolbox.ps1` now sets:
+
+```powershell
+azd env set FOUNDRY_PROJECT_ENDPOINT "<project-endpoint>"
+```
+
+### E) Deploy fails in postdeploy with `AZURE_TENANT_ID is not set in the environment`
+
+Symptom:
+- Happens after service deploy in azd event hooks.
+
+Fix applied:
+- Workflow exports `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` at job env scope for all stages.
+
+### F) Foundry quality eval shows `Partial` and 0 scored
+
+Symptom:
+- Evaluations run appears in UI but metrics show 0/0 with evaluator errors.
+
+Fix:
+- Workflow auto-remediation now runs post-provision and should prevent this in normal staged runs.
+- If this still happens, run manual RBAC assignment:
+- Grant the principal from the evaluator error:
+  - Role: `Cognitive Services OpenAI User`
+  - Scope: AI account resource id
+
+```powershell
+az role assignment create `
+  --assignee-object-id <principal-object-id-from-eval-error> `
+  --assignee-principal-type User `
+  --role "Cognitive Services OpenAI User" `
+  --scope "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<ai-account-name>"
+```
+
